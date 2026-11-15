@@ -1,70 +1,51 @@
+"""Query the local demo API and optionally export notification drafts."""
+import argparse
+import json
+import math
+from pathlib import Path
 import requests
-import smtplib
-from email.mime.text import MIMEText
 
-# Replace these placeholders with your actual API keys and details
-MARINE_TRAFFIC_API_KEY = "marine_traffic_api_key"
-SMTP_SERVER = "smtp_server.com"
-SMTP_PORT = 587
-SMTP_USERNAME = "email@example.com"
-SMTP_PASSWORD = "email_password"
 
-def get_ship_information(ship_id):
-    try:
-        # Use the MarineTraffic API to get ship information
-        url = f"https://api.marinetraffic.com/vesselmasterdata/v1/{ship_id}?key={MARINE_TRAFFIC_API_KEY}"
-        response = requests.get(url)
-        
-        if response.status_code == 200:
-            ship_data = response.json()
-            return ship_data
-        else:
-            print(f"Failed to retrieve ship information. Status Code: {response.status_code}")
-            return None
-    
-    except requests.RequestException as e:
-        print(f"Error in the request: {e}")
-        return None
+def get_nearby_ships(base_url, latitude, longitude, radius):
+    response = requests.get(f'{base_url.rstrip("/")}/nearby-ships', params={'latitude': latitude, 'longitude': longitude, 'radius': radius}, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list):
+        raise ValueError('API returned an unexpected response; expected a vessel list.')
+    for ship in data:
+        if not isinstance(ship, dict) or not {'ship_id', 'name', 'distance_km'} <= ship.keys():
+            raise ValueError('API returned an invalid vessel record.')
+        if not isinstance(ship['name'], str) or isinstance(ship['distance_km'], bool) or not isinstance(ship['distance_km'], (int, float)) or not math.isfinite(ship['distance_km']) or ship['distance_km'] < 0:
+            raise ValueError('API returned an invalid vessel name or distance.')
+    return data
 
-def craft_email(ship_data):
-    if ship_data:
-        # Create a personalized email content based on ship information
-        email_content = f"Hello {ship_data.get('OWNER', 'Ship Owner')},\n\n"\
-                        f"We noticed that your ship, {ship_data.get('SHIPNAME', 'Unknown Ship')}, is near our port at {ship_data.get('LATITUDE', 0)}, {ship_data.get('LONGITUDE', 0)}.\n"\
-                        "We offer excellent maritime services that could benefit your operations.\n"\
-                        "Let's discuss how we can collaborate!\n\n"\
-                        "Best regards,\n"\
-                        "SeaTracker Pro Team"
-        return email_content
-    else:
-        return "Error in retrieving ship information. Please check the logs for details."
 
-def send_email(subject, body, to_email):
-    try:
-        # Setup the MIME
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = SMTP_USERNAME
-        msg['To'] = to_email
+def craft_email(ship):
+    return (f'DRAFT — vessel proximity notification\n\n'
+            f'{ship["name"]} is approximately {ship["distance_km"]:.2f} km from the selected reference point.\n'
+            'Verify the position and service requirements before contacting the vessel operator.\n'
+            'Demo positions are synthetic; this draft is not sent.')
 
-        # Establish a connection to the SMTP server
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(SMTP_USERNAME, to_email, msg.as_string())
-        print("Email sent successfully!")
-    
-    except smtplib.SMTPException as e:
-        print(f"Error sending email: {e}")
 
 def main():
-    # Example usage:
-    ship_id = "12345"  # Replace with the actual ship ID
-    ship_data = get_ship_information(ship_id)
-    email_content = craft_email(ship_data)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--api-url', default='http://127.0.0.1:5000')
+    parser.add_argument('--latitude', type=float, default=25.28)
+    parser.add_argument('--longitude', type=float, default=55.29)
+    parser.add_argument('--radius', type=float, default=30, help='Radius in kilometers')
+    parser.add_argument('--output', type=Path, help='Optional JSON output; existing file is replaced')
+    args = parser.parse_args()
+    try:
+        ships = get_nearby_ships(args.api_url, args.latitude, args.longitude, args.radius)
+        report = {'data_mode': 'synthetic_demo', 'reference': {'latitude': args.latitude, 'longitude': args.longitude}, 'radius_km': args.radius, 'vessel_count': len(ships), 'ships': ships, 'notification_drafts': [craft_email(s) for s in ships]}
+        serialized = json.dumps(report, indent=2, allow_nan=False)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(serialized + '\n', encoding='utf-8')
+        print(serialized)
+    except (requests.RequestException, ValueError, OSError) as exc:
+        parser.exit(1, f'Error: {exc}\n')
 
-    if email_content:
-        send_email("SeaTracker Pro - New Opportunity", email_content, "company@example.com")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
